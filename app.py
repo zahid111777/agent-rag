@@ -27,7 +27,7 @@ import pandas as pd
 from tqdm import tqdm
 import PyPDF2
 from sentence_transformers import SentenceTransformer
-import faiss
+from sklearn.neighbors import NearestNeighbors
 from groq import Groq
 from gtts import gTTS
 
@@ -240,7 +240,7 @@ def build_embeddings_from_directory(data_directory: str, chunk_size: int = 512, 
     }
 
 class DocumentRetriever:
-    """Retrieve relevant documents using FAISS"""
+    """Retrieve relevant documents using scikit-learn NearestNeighbors"""
     def __init__(self, embedding_model_name: str = 'all-MiniLM-L6-v2'):
         self.embedding_generator = EmbeddingGenerator(embedding_model_name)
         self.index = None
@@ -250,10 +250,13 @@ class DocumentRetriever:
     def build_index(self, chunks: List[Dict[str, Any]], embeddings: np.ndarray) -> None:
         self.chunks = chunks
         self.embeddings = embeddings
-        embedding_dim = embeddings.shape[1]
-        self.index = faiss.IndexFlatIP(embedding_dim)
+        
+        # Normalize embeddings
         embeddings_normalized = embeddings / np.linalg.norm(embeddings, axis=1, keepdims=True)
-        self.index.add(embeddings_normalized.astype(np.float32))
+        
+        # Build sklearn index
+        self.index = NearestNeighbors(n_neighbors=min(10, len(embeddings)), metric='cosine', algorithm='brute')
+        self.index.fit(embeddings_normalized)
 
     def search(self, query: str, k: int = 5) -> List[Dict[str, Any]]:
         if not self.index:
@@ -261,14 +264,17 @@ class DocumentRetriever:
 
         query_embedding = self.embedding_generator.get_query_embedding(query)
         query_normalized = query_embedding / np.linalg.norm(query_embedding)
-        scores, indices = self.index.search(query_normalized.reshape(1, -1).astype(np.float32), k)
+        
+        # Search using sklearn
+        distances, indices = self.index.kneighbors([query_normalized], n_neighbors=min(k, len(self.chunks)))
 
         results = []
-        for i, (score, idx) in enumerate(zip(scores[0], indices[0])):
-            if idx >= 0:
-                chunk = self.chunks[idx].copy()
-                chunk.update({'similarity_score': float(score), 'rank': i + 1})
-                results.append(chunk)
+        for i, (distance, idx) in enumerate(zip(distances[0], indices[0])):
+            chunk = self.chunks[idx].copy()
+            # Convert distance to similarity (cosine distance to similarity)
+            similarity = 1 - distance
+            chunk.update({'similarity_score': float(similarity), 'rank': i + 1})
+            results.append(chunk)
         return results
 
 class AgenticTools:
