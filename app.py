@@ -240,41 +240,43 @@ def build_embeddings_from_directory(data_directory: str, chunk_size: int = 512, 
     }
 
 class DocumentRetriever:
-    """Retrieve relevant documents using scikit-learn NearestNeighbors"""
+    """Retrieve relevant documents using pure NumPy (no compilation needed)"""
     def __init__(self, embedding_model_name: str = 'all-MiniLM-L6-v2'):
         self.embedding_generator = EmbeddingGenerator(embedding_model_name)
-        self.index = None
         self.chunks = []
         self.embeddings = None
+        self.embeddings_normalized = None
 
     def build_index(self, chunks: List[Dict[str, Any]], embeddings: np.ndarray) -> None:
         self.chunks = chunks
         self.embeddings = embeddings
         
-        # Normalize embeddings
-        embeddings_normalized = embeddings / np.linalg.norm(embeddings, axis=1, keepdims=True)
-        
-        # Build sklearn index
-        self.index = NearestNeighbors(n_neighbors=min(10, len(embeddings)), metric='cosine', algorithm='brute')
-        self.index.fit(embeddings_normalized)
+        # Normalize embeddings for cosine similarity
+        norms = np.linalg.norm(embeddings, axis=1, keepdims=True)
+        self.embeddings_normalized = embeddings / (norms + 1e-8)
 
     def search(self, query: str, k: int = 5) -> List[Dict[str, Any]]:
-        if not self.index:
+        if self.embeddings_normalized is None or len(self.chunks) == 0:
             return []
 
+        # Get query embedding
         query_embedding = self.embedding_generator.get_query_embedding(query)
-        query_normalized = query_embedding / np.linalg.norm(query_embedding)
+        query_norm = np.linalg.norm(query_embedding)
+        query_normalized = query_embedding / (query_norm + 1e-8)
         
-        # Search using sklearn
-        distances, indices = self.index.kneighbors([query_normalized], n_neighbors=min(k, len(self.chunks)))
-
+        # Compute cosine similarities using NumPy
+        similarities = np.dot(self.embeddings_normalized, query_normalized)
+        
+        # Get top-k indices
+        k = min(k, len(self.chunks))
+        top_indices = np.argsort(similarities)[-k:][::-1]  # Sort descending
+        
         results = []
-        for i, (distance, idx) in enumerate(zip(distances[0], indices[0])):
-            chunk = self.chunks[idx].copy()
-            # Convert distance to similarity (cosine distance to similarity)
-            similarity = 1 - distance
-            chunk.update({'similarity_score': float(similarity), 'rank': i + 1})
+        for rank, idx in enumerate(top_indices):
+            chunk = self.chunks[int(idx)].copy()
+            chunk.update({'similarity_score': float(similarities[idx]), 'rank': rank + 1})
             results.append(chunk)
+        
         return results
 
 class AgenticTools:
